@@ -1,0 +1,246 @@
+Use "libBase64" 'libBase64.lss
+%REM
+	Notes 그룹웨어내 본문 중 HTML부분만 추출(Body항목중에서 MIME - text/html 추출)
+	Notes 그룹웨어내 첨부파일 추출
+	2021.3. 15. Body내 text/html 영역만 추출로 변경
+%END REM
+
+Dim s As NotesSession
+Dim w As NotesUIWorkspace
+Dim db As NotesDatabase
+Dim dc As NotesDocumentCollection
+Dim doc As NotesDocument
+Dim mime As NotesMIMEEntity
+Dim stream As NotesStream
+
+Dim dstDir As String	
+Dim rtitem As NotesRichTextItem
+Dim content As String
+Dim RTNames List As String
+Dim DOCNames List As String
+Dim itemCount As Integer
+Dim defaultFolder As String
+Dim x As Integer
+Dim vtDir As Variant
+Dim iCount As Integer
+Dim j As Integer
+Dim lngExportedCount As Long
+Dim attachmentObject As Variant
+
+Dim sDir As String '저장할 디렉토리
+Dim docCount As Integer
+Dim htmlCount As Integer
+Dim sDocNum As String '생성할 문서구분번호(문서번호 등)
+Dim msg As String
+
+'에러로그 관련
+Dim errFileName As String
+Dim errText As String
+
+'#####################################################################################
+'################## 디렉토리선택을 위한 BrowseForFolder()함수관련  Start################
+'#####################################################################################
+Declare Function ShellExecute Lib "shell32" Alias "ShellExecuteA" _
+ (ByVal hwnd As Long, ByVal operation As String, ByVal fileName As String, _
+ ByVal parameters As String, ByVal directory As String, ByVal displayType As Long) As Long
+
+Declare Function FindExecutable Lib "shell32" Alias "FindExecutableA" _ 
+ (ByVal fileName As String, ByVal directory As String, ByVal retAssociation As String) As Long
+
+
+Const SW_HIDE = 0
+Const SW_SHOWNORMAL = 1
+Const SW_NORMAL = 1
+Const SW_SHOWMINIMIZED = 2
+Const SW_SHOWMAXIMIZED = 3
+Const SW_MAXIMIZE = 3
+Const SW_SHOWNOACTIVATE = 4
+Const SW_SHOW = 5
+Const SW_MINIMIZE = 6
+Const SW_SHOWMINNOACTIVE = 7
+Const SW_SHOWNA = 8
+Const SW_RESTORE = 9
+Const SW_SHOWDEFAULT = 10
+Const SW_MAX = 10
+
+'** possible errors returned by ShellExecute
+Const ERROR_OUT_OF_MEMORY = 0		'The operating system is out of memory or resources.
+Const ERROR_FILE_NOT_FOUND = 2		'The specified file was not found. 
+Const ERROR_PATH_NOT_FOUND = 3	'The specified path was not found. 
+Const ERROR_BAD_FORMAT = 11			'The .exe file is invalid (non-Microsoft Win32® .exe or error in .exe image). 
+Const SE_ERR_FNF = 2							'The specified file was not found. 
+Const SE_ERR_PNF = 3						'The specified path was not found. 
+Const SE_ERR_ACCESSDENIED = 5		'The operating system denied access to the specified file. 
+Const SE_ERR_OOM = 8						'There was not enough memory to complete the operation. 
+Const SE_ERR_SHARE = 26					'A sharing violation occurred. 
+Const SE_ERR_ASSOCINCOMPLETE = 27	'The file name association is incomplete or invalid. 
+Const SE_ERR_DDETIMEOUT = 28			'The DDE transaction could not be completed because the request timed out. 
+Const SE_ERR_DDEFAIL = 29				'The DDE transaction failed. 
+Const SE_ERR_DDEBUSY = 30				'The Dynamic Data Exchange (DDE) transaction could not be completed because other DDE transactions were being processed. 
+Const SE_ERR_NOASSOC = 31				'There is no application associated with the given file name extension. This error will also be returned if you attempt to print a file that is not printable. 
+Const SE_ERR_DLLNOTFOUND = 32		'The specified dynamic-link library (DLL) was not found. 
+
+Declare Function GetActiveWindow Lib "user32.dll" () As Long 
+
+' // BrowseInfo stucture
+Type BROWSEINFO
+hwndOwner As Long
+pidlRoot As Long
+pszDisplayName As String
+lpszTitle As String
+ulFlags As Long
+lpfn As Long
+lParam As Long
+iImage As Long
+End Type
+
+' // BrowseFlags constants
+Const BIF_BROWSEFORCOMPUTER = 1000
+Const BIF_BROWSEFORPRINTER = 2000
+Const BIF_DONTGOBELOWDOMAIN = 2
+Const BIF_RETURNFSANCESTORS = 8
+Const BIF_RETURNONLYFSDIRS = 1
+Const BIF_STATUSTEXT = 4
+
+Const MAX_SIZE = 255
+
+' // Win32 function to browse for a folder, rather than a file or files
+Declare Function BrowseFolderDlg Lib "shell32.dll" Alias "SHBrowseForFolder" (lpBrowseInfo As BROWSEINFO) As Long
+
+' // Win32 function that returns the path of the folder selected
+Declare Function GetPathFromIDList Lib "shell32.dll" Alias "SHGetPathFromIDList" (ByVal PointerToIDList As Long, ByVal pszPath As String) As Long
+
+'########################################################################
+'################## 디렉토리선택을 위한 BrowseForFolder()함수관련 END##################
+'########################################################################
+
+'** Main 시작
+
+Sub Initialize
+	If MessageBox("본문 추출을 시작합니다.", 1, "확인") = 2 Then
+		Exit Sub
+	End If
+	
+	On Error GoTo ErrHandling
+	
+	Dim s As New NotesSession
+	Dim db As NotesDatabase
+	Dim dc As NotesDocumentCollection
+	Set db = s.CurrentDatabase
+	Dim b64 As New CBase64()
+	s.ConvertMIME = False ' Do not convert MIME to rich text
+	Set dc = db.UnprocessedDocuments
+	Set doc = dc.GetFirstDocument
+	
+	
+	dstDir = BrowseForFolder() '대화형 함수 사용시
+	
+	errFileName = dstDir + "\error.log"
+	
+	If Dir$(dstDir, 16) = "" Then '디렉토리 없을 경우 생성
+		MkDir dstDir
+	End If
+	
+	docCount = 0 '전체 문서 건수
+	htmlCount = 0 'html본문 건수
+	
+	While Not(doc Is Nothing)
+		docCount = docCount + 1
+		iCount = 0
+		itemCount = 0
+		fileNum = 0
+		lngExportedCount = 0		
+		sDocNum = doc.DocNumber(0)
+		If sDocNum = "" Then 	'DocNumber컬럼이 존재하는 문서가 있을 경우
+			sDocNum = doc.UniversalID '문서 구분을 UNID로 설정
+		End If
+		
+		sDir = dstDir + "\" + sDocNum
+		
+		ForAll i In doc.Items
+			Set mime = i.GetMIMEEntity
+			If Not(mime Is Nothing) And i.Name = "Body" Then 'mime형식의 Body부분
+				If Not (mime Is Nothing) And mime.ContentType = "multipart" Then 'multipart형식의 Body부분
+					Set child1 = mime.Getfirstchildentity
+					While Not (child1 Is Nothing)
+						If (child1.Contenttype = "text" And child1.contentsubtype = "html") Then 'Body부분에서 child노드를 검색 후 text/html 영역
+							htmlCount = htmlCount + 1
+							fileNum = fileNum + 1
+							content = child1.ContentAsText
+							If Dir$(sDir, 16) = "" Then
+								MkDir sDir
+							End If
+							sContentFileName = sDir + "\" + doc.DocNumber(0) + "_본문.html"
+							Call b64.decodeStringToFile (content, sContentFileName)
+							Exit ForAll
+						End If
+						Set child2 = child1.Getfirstchildentity
+						If (child2 Is Nothing) Then
+							Set child2 = child1.Getnextsibling
+							If (child2 Is Nothing) Then
+								Set child2 = child1.Getparententity
+								If Not(child2 Is Nothing) Then
+									Set child2 = child2.Getnextsibling
+								End If
+							End If
+							
+						End If
+						Set child1 = child2
+					Wend
+					
+				End If		
+			Else
+				
+			End If
+			
+		End ForAll
+		Set doc = dc.GetNextDocument(doc)
+	Wend
+	MsgBox "본문파일 다운로드 완료(대상문서건수 : " & CStr(docCount) & ", 완료건수 : " & CStr(htmlCount) & ", 저장경로: " & dstDir & ")"
+	
+	s.ConvertMIME = True ' Restore conversion
+	
+errHandling:
+	MsgBox Error + ":" + "Line Number : " + CStr(Erl) + " Code : " + CStr(Err)
+	Exit Sub
+	
+End Sub
+
+
+Function BrowseForFolder() As String
+	Dim mBrowseInfo As BROWSEINFO
+	Dim lngPointerToIDList As Long
+	Dim lngResult As Long
+	Dim strPathBuffer As String
+	Dim strReturnPath As String
+	Dim vbNullChar As String
+
+	vbNullChar = Chr(0)
+
+	On Error GoTo lblErrs
+
+	mBrowseInfo.hwndOwner = GetActiveWindow()
+	mBrowseInfo.pidlRoot = 0
+	mBrowseInfo.lpszTitle = "저장할 폴더를 지정하세요"
+	mBrowseInfo.pszDisplayName = String(MAX_SIZE, Chr(0))
+	mBrowseInfo.ulFlags = BIF_RETURNONLYFSDIRS
+	lngPointerToIDList = BrowseFolderDlg(mBrowseInfo)
+
+	If lngPointerToIDList <> 0& Then
+	' // Create a buffer
+		strPathBuffer = String(MAX_SIZE, Chr(0))
+	' // Now get the selected path
+		lngResult = GetPathFromIDList(ByVal lngPointerToIDList, ByVal strPathBuffer)
+	' // And return just that
+		strReturnPath = Left$(strPathBuffer, InStr(strPathBuffer, vbNullChar) - 1)
+	End If
+
+	BrowseForFolder = strReturnPath
+
+	lblEnd:
+		Exit Function
+
+	lblErrs:
+		MessageBox "Unexpected error: " & Error$ & " (" & CStr(Err) & ").", 0, "Error"
+		Resume lblEnd
+End Function
